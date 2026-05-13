@@ -1,20 +1,11 @@
 from dataclasses import dataclass
-from pwndbg.commands.context import contextoutput, output, clear_screen, context, resetcontextoutput
-from subprocess import check_output, CalledProcessError, run
 import atexit
-import copy
-import fcntl
 import gdb
-import io, sys
-import math
 import os
 import pwndbg
-import pwndbg.commands.context as ctx
 import re
-import struct
-import termios
+import subprocess
 import time
-from pwndbg.commands import CommandCategory
 
 # TODO: maybe cleanup define/init order
 # TODO: scrolling in code/disasm should request more code/disasm ?
@@ -23,7 +14,6 @@ def running() -> bool:
     return gdb.events.start.running
 
 def debugprint(s) -> None:
-    import time
     with open("/tmp/debug", "a") as f:
         f.write(f"[{time.time()}]: {s}\n")
 
@@ -36,16 +26,16 @@ TMUX_DRAW_OFFSET = 2
 UNKNOWN_SYM = "symbol and line for <unknown>, line 0"
 
 context_functions_dict = {
-    "args": ctx.context_args,
-    "regs": ctx.context_regs,
-    "disasm": ctx.context_disasm,
-    "stack": ctx.context_stack,
-    "backtrace": ctx.context_backtrace,
-    "code": ctx.context_code,
-    "last_signal": ctx.context_last_signal,
-    "expressions": ctx.context_expressions,
-    "heap_tracker": ctx.context_heap_tracker,
-    "threads": ctx.context_threads,
+    "args": pwndbg.commands.context.context_args,
+    "regs": pwndbg.commands.context.context_regs,
+    "disasm": pwndbg.commands.context.context_disasm,
+    "stack": pwndbg.commands.context.context_stack,
+    "backtrace": pwndbg.commands.context.context_backtrace,
+    "code": pwndbg.commands.context.context_code,
+    "last_signal": pwndbg.commands.context.context_last_signal,
+    "expressions": pwndbg.commands.context.context_expressions,
+    "heap_tracker": pwndbg.commands.context.context_heap_tracker,
+    "threads": pwndbg.commands.context.context_threads,
 }
 
 def context_disasm_code(**kwargs):
@@ -70,7 +60,7 @@ def read_tmux_output(res, delimiter=':'):
   return res.strip().split(delimiter)
 
 def pts_size(split):
-    res = check_output(['tmux','display','-p','-F', '#{pane_width}:#{pane_height}','-t', split.id])
+    res = subprocess.check_output(['tmux','display','-p','-F', '#{pane_width}:#{pane_height}','-t', split.id])
     res = read_tmux_output(res)
     return PtsSize(cols=int(res[0]), rows=int(res[1]))
 
@@ -86,15 +76,15 @@ class TmuxSplit:
 
 def tmux_pane_title(pane, title):
     if pane is not None:
-        check_output(['tmux','select-pane','-T',title,'-t',pane.id])
+        subprocess.check_output(['tmux','select-pane','-T',title,'-t',pane.id])
         return
-    check_output(['tmux','select-pane','-T',title])
+    subprocess.check_output(['tmux','select-pane','-T',title])
 
 class Mind():
     def __init__(self):
         self.last = None
         self.panes = [TmuxSplit(os.environ["TMUX_PANE"], None, MAIN_WINDOW_TITLE, {}) ]
-        self._saved_tmux_options = read_tmux_output(check_output(['tmux', 'show-options', '-w']), delimiter="\n")
+        self._saved_tmux_options = read_tmux_output(subprocess.check_output(['tmux', 'show-options', '-w']), delimiter="\n")
         if not [o for o in self._saved_tmux_options if o.startswith("pane-border-status")]:
             self._saved_tmux_options.append("pane-border-status off")
         atexit.register(self.close)
@@ -119,7 +109,7 @@ class Mind():
             *(['-l', size] if size else []),
             'exec sleep infinity'
         ]
-        res = check_output(commands)
+        res = subprocess.check_output(commands)
         split = TmuxSplit(*read_tmux_output(res), display)
         tmux_pane_title(split, display)
         self.panes.append(split)
@@ -128,7 +118,7 @@ class Mind():
         # we might want to create a better config system.
         if split.display == "tty":
             gdb.execute(f"set inferior-tty {split.tty}")
-            run(['stty', 'sane', '-F', split.tty])
+            subprocess.run(['stty', 'sane', '-F', split.tty])
         if split.display == "disasm/code combo":
             flipflopper = split
             split.display_tuple = ("disasm", "code")
@@ -151,7 +141,7 @@ class Mind():
         return self
 
     def build(self, **kwargs):
-        check_output(['tmux', 'select-pane', "-t", os.environ["TMUX_PANE"]])
+        subprocess.check_output(['tmux', 'select-pane', "-t", os.environ["TMUX_PANE"]])
         # store sizes:
         for split in self.panes:
             if split.tty == None:
@@ -166,7 +156,7 @@ class Mind():
         if target is None:
             target = self.last
         if show_titles is not None:
-            check_output(['tmux','set' ,'pane-border-status', {"bottom":"bottom", False:"off"}.get(show_titles, "top")])
+            subprocess.check_output(['tmux','set' ,'pane-border-status', {"bottom":"bottom", False:"off"}.get(show_titles, "top")])
         if set_title is not None:
             tmux_pane_title(self.get(target), set_title)
         return self
@@ -174,11 +164,11 @@ class Mind():
     def close(self):
         for pane in set(pane.id for pane in self.panes[1:]):
             try:
-                check_output(['tmux','kill-pane','-t',pane])
-            except CalledProcessError as err:
+                subprocess.check_output(['tmux','kill-pane','-t',pane])
+            except subprocess.CalledProcessError as err:
                 print(err)
         for option in [o for o in self._saved_tmux_options if o]:
-            check_output(["tmux", "set"] + option.split(" "))
+            subprocess.check_output(["tmux", "set"] + option.split(" "))
 
 def render_to_pts(section_fn, split):
     buf = section_fn(with_banner=False)
@@ -188,7 +178,7 @@ def render_to_pts(section_fn, split):
         lines = 0
         for line in buf:
             visible_line_len = len(re.sub(r'\033\[[0-9;]*[a-zA-Z]', '', line))
-            count += max(1, math.ceil(visible_line_len / split.pts_size.cols)) if visible_line_len else 1
+            count += max(1, (visible_line_len // split.pts_size.cols) + 1) if visible_line_len else 1
             if count > split.pts_size.rows:
                 break
             lines += 1
@@ -224,11 +214,11 @@ def drawPanes(event):
             render_to_pts(fn, split)
 
 # IDK if really needed.
-ctx_context_invoke = ctx.context.invoke
+ctx_context_invoke = pwndbg.commands.context.context.invoke
 def hook_ctx_context_invoke(self, *args, **kwargs):
     drawPanes(None)
     ctx_context_invoke(self, *args, **kwargs)
-ctx.context.invoke = hook_ctx_context_invoke
+pwndbg.commands.context.context.invoke = hook_ctx_context_invoke
 
 gdb.events.stop.connect(drawPanes)
 flipflop()
