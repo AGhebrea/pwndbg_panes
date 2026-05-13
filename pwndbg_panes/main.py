@@ -8,6 +8,7 @@ import subprocess
 import time
 
 # TODO: maybe cleanup define/init order
+# TODO: windows can be resized, resync size on ctx ?
 # TODO: scrolling in code/disasm should request more code/disasm ?
 
 def running() -> bool:
