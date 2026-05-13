@@ -14,25 +14,26 @@ import re
 import struct
 import termios
 import time
+from pwndbg.commands import CommandCategory
 
 # TODO: maybe cleanup define/init order
-# TODO: render sections only if running. The flipflop command tries to render when not running and that causes 
-#       pwndbg to raise errors.
-# TODO: override ctx command and make it redraw instead
-#       -> when no code is avail, going up into a function with avail code does not list code, 
-#       we need to hook ctx for this
-# TODO: init with code first if debug info is available,
-#       maybe run maintenance info sections and check output
-# TODO: scrolling in code/disasm should request more code/disasm
+# TODO: scrolling in code/disasm should request more code/disasm ?
 
-def debugprint(s):
+def running() -> bool:
+    return gdb.events.start.running
+
+def debugprint(s) -> None:
     import time
     with open("/tmp/debug", "a") as f:
         f.write(f"[{time.time()}]: {s}\n")
 
 flipflopper = None
+flipflopper_initialized = False
+FLIPFLOPPER_DISASM_IDX = 0
+FLIPFLOPPER_CODE_IDX = 1
 MAIN_WINDOW_TITLE = "PWNDBG"
 TMUX_DRAW_OFFSET = 2
+UNKNOWN_SYM = "symbol and line for <unknown>, line 0"
 
 context_functions_dict = {
     "args": ctx.context_args,
@@ -157,7 +158,6 @@ class Mind():
                 continue
             split.pts_size = pts_size(split)
         # request code/disasm lines to fill pane
-        print(f"debug: code_disasm_size {flipflopper.pts_size.rows}")
         gdb.execute(f"set context-code-lines {flipflopper.pts_size.rows}")
         # disasm does not always honor this; does not matter, we scroll up anyways
         gdb.execute(f"set context-disasm-lines {flipflopper.pts_size.rows}")
@@ -204,14 +204,18 @@ class flipflop(gdb.Command):
         super().__init__("flipflop", gdb.COMMAND_USER, gdb.COMPLETE_NONE, False)
 
     def invoke(self, arg, from_tty):
-        if flipflopper.active_display:
-            flipflopper.active_display = 0
-        else:
-            flipflopper.active_display = 1
+        if not running():
+            return
+        flipflopper.active_display = (flipflopper.active_display + 1) % 2
         render_to_pts(context_disasm_code, flipflopper)
 mind = Mind()
 
-def on_stop(event):
+def drawPanes(event):
+    global flipflopper_initialized
+    if not flipflopper_initialized:
+        if gdb.find_pc_line(gdb.selected_frame().pc()) != UNKNOWN_SYM:
+            flipflopper.active_display = FLIPFLOPPER_CODE_IDX
+        flipflopper_initialized = True
     for split in mind.panes:
         fn = context_functions_dict.get(split.display, None)
         if fn is None:
@@ -219,5 +223,12 @@ def on_stop(event):
         if fn:
             render_to_pts(fn, split)
 
-gdb.events.stop.connect(on_stop)
+# IDK if really needed.
+ctx_context_invoke = ctx.context.invoke
+def hook_ctx_context_invoke(self, *args, **kwargs):
+    drawPanes(None)
+    ctx_context_invoke(self, *args, **kwargs)
+ctx.context.invoke = hook_ctx_context_invoke
+
+gdb.events.stop.connect(drawPanes)
 flipflop()
