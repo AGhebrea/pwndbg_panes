@@ -80,7 +80,7 @@ def tmux_pane_title(pane, title):
         return
     subprocess.check_output(['tmux','select-pane','-T',title])
 
-class Mind():
+class Panes():
     def __init__(self):
         self.last = None
         self.panes = [TmuxSplit(os.environ["TMUX_PANE"], None, MAIN_WINDOW_TITLE, {}) ]
@@ -198,7 +198,8 @@ class flipflop(gdb.Command):
             return
         flipflopper.active_display = (flipflopper.active_display + 1) % 2
         render_to_pts(context_disasm_code, flipflopper)
-mind = Mind()
+
+panes = Panes()
 
 def drawPanes(event):
     global flipflopper_initialized
@@ -206,7 +207,7 @@ def drawPanes(event):
         if gdb.find_pc_line(gdb.selected_frame().pc()) != UNKNOWN_SYM:
             flipflopper.active_display = FLIPFLOPPER_CODE_IDX
         flipflopper_initialized = True
-    for split in mind.panes:
+    for split in panes.panes:
         fn = context_functions_dict.get(split.display, None)
         if fn is None:
             fn = special_displays_dict[split.display]

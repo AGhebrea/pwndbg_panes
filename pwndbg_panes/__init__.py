@@ -1,1 +1,1 @@
-from .implementation import *
+from .main import panes
