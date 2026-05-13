@@ -3,24 +3,27 @@ from pwndbg.commands.context import contextoutput, output, clear_screen, context
 from subprocess import check_output, CalledProcessError, run
 import atexit
 import copy
+import fcntl
+import gdb
 import io, sys
+import math
 import os
 import pwndbg
 import pwndbg.commands.context as ctx
+import re
+import struct
+import termios
 import time
-import gdb
 
 # TODO: maybe cleanup define/init order
-# TODO: modify size to be percentage of screen after everything is drawn ?
 # TODO: render sections only if running. The flipflop command tries to render when not running and that causes 
 #       pwndbg to raise errors.
-# TODO: figure out a way to make pwndbg disasm not have empty lines after BBs. Alternatively
-#       make pwndbg honor the set context-disasm-lines even with the spaces.
 # TODO: override ctx command and make it redraw instead
 #       -> when no code is avail, going up into a function with avail code does not list code, 
 #       we need to hook ctx for this
 # TODO: init with code first if debug info is available,
 #       maybe run maintenance info sections and check output
+# TODO: scrolling in code/disasm should request more code/disasm
 
 def debugprint(s):
     import time
@@ -29,6 +32,7 @@ def debugprint(s):
 
 flipflopper = None
 MAIN_WINDOW_TITLE = "PWNDBG"
+TMUX_DRAW_OFFSET = 2
 
 context_functions_dict = {
     "args": ctx.context_args,
@@ -53,16 +57,9 @@ special_displays_dict = {
 }
 
 @dataclass
-class TmuxSplit:
-    id: str
-    tty: str
-    display: str
-    active_display: int = 0
-    display_tuple: list = None
-
-    def size(self):
-        res = check_output(['tmux','display','-p','-F', '#{pane_width}:#{pane_height}','-t', self.id])
-        return [int(x) for x in read_tmux_output(res)]
+class PtsSize:
+    rows: int = None
+    cols: int = None
 
 def read_tmux_output(res, delimiter=':'):
   try:
@@ -70,6 +67,21 @@ def read_tmux_output(res, delimiter=':'):
   except:
     pass
   return res.strip().split(delimiter)
+
+def pts_size(split):
+    res = check_output(['tmux','display','-p','-F', '#{pane_width}:#{pane_height}','-t', split.id])
+    res = read_tmux_output(res)
+    return PtsSize(cols=int(res[0]), rows=int(res[1]))
+
+@dataclass
+class TmuxSplit:
+    id: str
+    tty: str
+    display: str
+    active_display: int = 0
+    display_tuple: list = None
+    pts_size: PtsSize = None
+    scrollable: bool = True
 
 def tmux_pane_title(pane, title):
     if pane is not None:
@@ -85,6 +97,7 @@ class Mind():
         if not [o for o in self._saved_tmux_options if o.startswith("pane-border-status")]:
             self._saved_tmux_options.append("pane-border-status off")
         atexit.register(self.close)
+        gdb.execute("set context-sections last_signal expressions")
 
     def get(self, display):
         if isinstance(display, TmuxSplit):
@@ -110,12 +123,15 @@ class Mind():
         tmux_pane_title(split, display)
         self.panes.append(split)
 
+        # If we add more props that are specific to a split containing a certain context, 
+        # we might want to create a better config system.
         if split.display == "tty":
             gdb.execute(f"set inferior-tty {split.tty}")
             run(['stty', 'sane', '-F', split.tty])
         if split.display == "disasm/code combo":
             flipflopper = split
             split.display_tuple = ("disasm", "code")
+            split.scrollable = False
 
     def left (self, of=None, display=None, **kwargs):
         self.split("-hb", target=of, display=display, **kwargs)
@@ -135,12 +151,16 @@ class Mind():
 
     def build(self, **kwargs):
         check_output(['tmux', 'select-pane', "-t", os.environ["TMUX_PANE"]])
+        # store sizes:
+        for split in self.panes:
+            if split.tty == None:
+                continue
+            split.pts_size = pts_size(split)
         # request code/disasm lines to fill pane
-        code_disasm_size = flipflopper.size()[1]
-        gdb.execute(f"set context-code-lines {code_disasm_size}")
-        gdb.execute(f"set context-disasm-lines {code_disasm_size}")
-        # 
-        # gdb.execute("set disasm-annotations-right-margin 0")
+        print(f"debug: code_disasm_size {flipflopper.pts_size.rows}")
+        gdb.execute(f"set context-code-lines {flipflopper.pts_size.rows}")
+        # disasm does not always honor this; does not matter, we scroll up anyways
+        gdb.execute(f"set context-disasm-lines {flipflopper.pts_size.rows}")
 
     def tell_splitter(self, target=None, show_titles=None, set_title=None):
         if target is None:
@@ -160,12 +180,21 @@ class Mind():
         for option in [o for o in self._saved_tmux_options if o]:
             check_output(["tmux", "set"] + option.split(" "))
 
-def render_to_pts(section_fn, pts_path):
+def render_to_pts(section_fn, split):
     buf = section_fn(with_banner=False)
-    string = buf
-    if type(buf) == list:
-        string = '\n'.join(buf)
-    with open(pts_path, "w") as pts:
+    if not split.scrollable:
+        # write only as many lines as needed
+        count = 0
+        lines = 0
+        for line in buf:
+            visible_line_len = len(re.sub(r'\033\[[0-9;]*[a-zA-Z]', '', line))
+            count += max(1, math.ceil(visible_line_len / split.pts_size.cols)) if visible_line_len else 1
+            if count > split.pts_size.rows:
+                break
+            lines += 1
+        del buf[lines:]
+    string = '\n'.join(buf)
+    with open(split.tty, "w") as pts:
         pts.write("\033[2J\033[H")
         pts.write(string)
         pts.flush()
@@ -179,8 +208,7 @@ class flipflop(gdb.Command):
             flipflopper.active_display = 0
         else:
             flipflopper.active_display = 1
-        render_to_pts(context_disasm_code, flipflopper.tty)
-
+        render_to_pts(context_disasm_code, flipflopper)
 mind = Mind()
 
 def on_stop(event):
@@ -189,7 +217,7 @@ def on_stop(event):
         if fn is None:
             fn = special_displays_dict[split.display]
         if fn:
-            render_to_pts(fn, split.tty)
+            render_to_pts(fn, split)
 
 gdb.events.stop.connect(on_stop)
 flipflop()

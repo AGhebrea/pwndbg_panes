@@ -1,16 +1,14 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-from __future__ import print_function
-from __future__ import unicode_literals
-
-import sys
-from os import path
+import os
+if os.getenv("TMUX_PANE") is not None:
+    import sys
 
 
-directory, file = path.split(__file__)
-directory       = path.expanduser(directory)
-directory       = path.abspath(directory)
+    directory, file = os.path.split(__file__)
+    directory       = os.path.expanduser(directory)
+    directory       = os.path.abspath(directory)
 
-sys.path.append(directory)
+    sys.path.append(directory)
 
-import pwndbg_panes # isort:skip
+    import pwndbg_panes # isort:skip
